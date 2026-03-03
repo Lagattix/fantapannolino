@@ -1,34 +1,18 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
-// Sostituisci questo oggetto con la tua configurazione Firebase!
-// Puoi ottenerla creando un progetto su https://console.firebase.google.com/
 const firebaseConfig = {
-  apiKey: "IL_TUO_API_KEY",
-  authDomain: "IL_TUO_APP.firebaseapp.com",
-  projectId: "IL_TUO_PROJECT_ID",
-  storageBucket: "IL_TUO_APP.appspot.com",
-  messagingSenderId: "IL_TUO_SENDER_ID",
-  appId: "IL_TUO_APP_ID"
+  apiKey: "AIzaSyA1X7lkIYmZlEtx7NEAAhsR7fCReRGe5HU",
+  authDomain: "fantapannolino-40370.firebaseapp.com",
+  projectId: "fantapannolino-40370",
+  storageBucket: "fantapannolino-40370.firebasestorage.app",
+  messagingSenderId: "1056166776751",
+  appId: "1:1056166776751:web:09ddcb1f5fbd5613ca295a"
 };
 
-let app;
-let db;
+export const isFirebaseConfigured = () => true;
 
-// Funzione helper per verificare se Firebase è configurato
-export const isFirebaseConfigured = () => {
-  return firebaseConfig.apiKey && firebaseConfig.apiKey !== "IL_TUO_API_KEY";
-};
-
-if (isFirebaseConfigured()) {
-  try {
-    app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
-  } catch (error) {
-    console.error("Errore nell'inizializzazione di Firebase:", error);
-  }
-} else {
-  console.warn("Firebase non è configurato. L'app funzionerà in modalità DEMO locale.");
-}
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
 export { db };

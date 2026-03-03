@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { db, isFirebaseConfigured } from './firebase';
+import { db } from './firebase';
 import { collection, doc, setDoc, getDoc, onSnapshot, query, orderBy, updateDoc, writeBatch } from 'firebase/firestore';
 
 function App() {
-  const [view, setView] = useState('home'); // home, create, join, dashboard, winner
+  const [view, setView] = useState('home');
   const [leagueCode, setLeagueCode] = useState('');
   const [userName, setUserName] = useState('');
   const [leagueName, setLeagueName] = useState('');
@@ -13,78 +13,45 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [winner, setWinner] = useState(null);
 
-  // Local state for DEMO Mode
-  const isDemo = !isFirebaseConfigured();
-
-  // Try to load from localStorage if in DEMO
+  // Auto-login: se l'utente ha già una sessione salvata, entra direttamente
   useEffect(() => {
-    if (isDemo) {
-      const savedCode = localStorage.getItem('fp_leagueCode');
-      const savedUser = localStorage.getItem('fp_userName');
-      if (savedCode && savedUser) {
-        setLeagueCode(savedCode);
-        setUserName(savedUser);
-        loadDemoLeague(savedCode);
-        setView('dashboard');
-      }
+    const savedCode = localStorage.getItem('fp_leagueCode');
+    const savedUser = localStorage.getItem('fp_userName');
+    if (savedCode && savedUser) {
+      setLeagueCode(savedCode);
+      setUserName(savedUser);
+      setView('dashboard');
     }
-  }, [isDemo]);
-
-  // Demo functions
-  const loadDemoLeague = (code) => {
-    const data = JSON.parse(localStorage.getItem(`fp_league_${code}`) || 'null');
-    if (data) {
-      setLeagueData({ id: code, name: data.name, createdBy: data.createdBy });
-      const sortedTeachers = Object.keys(data.teachers).map(name => ({
-        id: name,
-        points: data.teachers[name]
-      })).sort((a, b) => b.points - a.points);
-      setTeachers(sortedTeachers);
-      return true;
-    }
-    return false;
-  };
-
-  const saveDemoLeague = (code, name, createdBy, teachersMap = {}) => {
-    localStorage.setItem(`fp_league_${code}`, JSON.stringify({ name, createdBy, teachers: teachersMap }));
-    loadDemoLeague(code);
-  };
+  }, []);
 
   // Create League
   const handleCreateLeague = async () => {
-    if (!leagueName || !userName) {
+    if (!leagueName.trim() || !userName.trim()) {
       setError('Inserisci il tuo nome e il nome della lega');
       return;
     }
     setLoading(true);
     setError('');
 
-    // Generate a simple 5-char code
     const code = Math.random().toString(36).substring(2, 7).toUpperCase();
-
-    if (isDemo) {
-      saveDemoLeague(code, leagueName, userName, { [userName]: 0 });
-      setLeagueCode(code);
-      localStorage.setItem('fp_leagueCode', code);
-      localStorage.setItem('fp_userName', userName);
-      setView('dashboard');
-      setLoading(false);
-      return;
-    }
 
     try {
       await setDoc(doc(db, "leagues", code), {
-        name: leagueName,
-        createdBy: userName,
+        name: leagueName.trim(),
+        createdBy: userName.trim(),
         createdAt: new Date()
       });
-      await setDoc(doc(db, "leagues", code, "teachers", userName), {
+      await setDoc(doc(db, "leagues", code, "teachers", userName.trim()), {
         points: 0
       });
       setLeagueCode(code);
+      setUserName(userName.trim());
+      localStorage.setItem('fp_leagueCode', code);
+      localStorage.setItem('fp_userName', userName.trim());
       setView('dashboard');
     } catch (e) {
-      setError('Errore di connessione a Firebase.');
+      console.error(e);
+      setError('Errore di connessione a Firebase: ' + e.message);
     } finally {
       setLoading(false);
     }
@@ -92,47 +59,34 @@ function App() {
 
   // Join League
   const handleJoinLeague = async () => {
-    if (!leagueCode || !userName) {
+    if (!leagueCode.trim() || !userName.trim()) {
       setError('Inserisci il tuo nome e il codice della lega');
       return;
     }
     setLoading(true);
     setError('');
-    const code = leagueCode.toUpperCase();
-    setLeagueCode(code);
-
-    if (isDemo) {
-      const exists = loadDemoLeague(code);
-      if (exists) {
-        const data = JSON.parse(localStorage.getItem(`fp_league_${code}`));
-        if (data.teachers[userName] === undefined) {
-          data.teachers[userName] = 0;
-          localStorage.setItem(`fp_league_${code}`, JSON.stringify(data));
-          loadDemoLeague(code);
-        }
-        localStorage.setItem('fp_leagueCode', code);
-        localStorage.setItem('fp_userName', userName);
-        setView('dashboard');
-      } else {
-        setError('Lega non trovata');
-      }
-      setLoading(false);
-      return;
-    }
+    const code = leagueCode.trim().toUpperCase();
+    const name = userName.trim();
 
     try {
       const leagueSnap = await getDoc(doc(db, "leagues", code));
       if (leagueSnap.exists()) {
-        const tDoc = await getDoc(doc(db, "leagues", code, "teachers", userName));
+        // La lega esiste! Aggiungi la maestra se non c'è già
+        const tDoc = await getDoc(doc(db, "leagues", code, "teachers", name));
         if (!tDoc.exists()) {
-          await setDoc(doc(db, "leagues", code, "teachers", userName), { points: 0 });
+          await setDoc(doc(db, "leagues", code, "teachers", name), { points: 0 });
         }
+        setLeagueCode(code);
+        setUserName(name);
+        localStorage.setItem('fp_leagueCode', code);
+        localStorage.setItem('fp_userName', name);
         setView('dashboard');
       } else {
-        setError('Lega non trovata in Firebase');
+        setError('Lega non trovata! Controlla il codice e riprova.');
       }
     } catch (e) {
-      setError('Errore. Controlla il codice.');
+      console.error(e);
+      setError('Errore di connessione: ' + e.message);
     } finally {
       setLoading(false);
     }
@@ -140,34 +94,24 @@ function App() {
 
   // Realtime updates when in dashboard
   useEffect(() => {
-    if (view === 'dashboard' && !isDemo) {
-      // Listen to league info
-      const unsubLeague = onSnapshot(doc(db, "leagues", leagueCode), (doc) => {
-        if (doc.exists()) setLeagueData({ id: doc.id, ...doc.data() });
+    if (view === 'dashboard' && leagueCode) {
+      const unsubLeague = onSnapshot(doc(db, "leagues", leagueCode), (docSnap) => {
+        if (docSnap.exists()) setLeagueData({ id: docSnap.id, ...docSnap.data() });
       });
 
-      // Listen to teachers
       const q = query(collection(db, "leagues", leagueCode, "teachers"), orderBy("points", "desc"));
       const unsubTeachers = onSnapshot(q, (snapshot) => {
         const t = [];
-        snapshot.forEach((doc) => t.push({ id: doc.id, ...doc.data() }));
+        snapshot.forEach((docSnap) => t.push({ id: docSnap.id, ...docSnap.data() }));
         setTeachers(t);
       });
 
       return () => { unsubLeague(); unsubTeachers(); };
     }
-  }, [view, leagueCode, isDemo]);
+  }, [view, leagueCode]);
 
   // Add Point (Diaper changed!)
   const handleAddDiaper = async () => {
-    if (isDemo) {
-      const data = JSON.parse(localStorage.getItem(`fp_league_${leagueCode}`));
-      data.teachers[userName] += 1;
-      localStorage.setItem(`fp_league_${leagueCode}`, JSON.stringify(data));
-      loadDemoLeague(leagueCode);
-      return;
-    }
-
     try {
       const userRef = doc(db, "leagues", leagueCode, "teachers", userName);
       const userSnap = await getDoc(userRef);
@@ -179,25 +123,15 @@ function App() {
     }
   };
 
-  // Reset Week (Announce winner and set points to zero)
+  // Reset Week
   const handleEndWeek = async () => {
     if (teachers.length === 0) return;
 
-    // Sort just in case
     const sorted = [...teachers].sort((a, b) => b.points - a.points);
     const weeklyWinner = sorted[0];
 
     setWinner(weeklyWinner);
     setView('winner');
-
-    // Reset points
-    if (isDemo) {
-      const data = JSON.parse(localStorage.getItem(`fp_league_${leagueCode}`));
-      Object.keys(data.teachers).forEach(k => data.teachers[k] = 0);
-      localStorage.setItem(`fp_league_${leagueCode}`, JSON.stringify(data));
-      loadDemoLeague(leagueCode);
-      return;
-    }
 
     try {
       const batch = writeBatch(db);
@@ -217,12 +151,9 @@ function App() {
     setLeagueData(null);
     setTeachers([]);
     setView('home');
-    if (isDemo) {
-      localStorage.removeItem('fp_leagueCode');
-      localStorage.removeItem('fp_userName');
-    }
+    localStorage.removeItem('fp_leagueCode');
+    localStorage.removeItem('fp_userName');
   };
-
 
   // --- RENDERS ---
 
@@ -234,11 +165,10 @@ function App() {
           <p className="subtitle">La lega più profumata dell'asilo!</p>
 
           <div className="input-group">
-            <button className="btn btn-primary" onClick={() => setView('join')}>Entra in una Lega</button>
+            <button className="btn btn-primary" onClick={() => { setError(''); setView('join'); }}>Entra in una Lega</button>
             <div className="divider">oppure</div>
-            <button className="btn btn-secondary" onClick={() => setView('create')}>Crea Nuova Lega</button>
+            <button className="btn btn-secondary" onClick={() => { setError(''); setView('create'); }}>Crea Nuova Lega</button>
           </div>
-          {isDemo && <p style={{ textAlign: 'center', fontSize: '0.8rem', opacity: 0.5 }}>Modalità Demo Locale Attiva</p>}
         </div>
       </div>
     );
@@ -249,7 +179,7 @@ function App() {
       <div className="app-container">
         <div className="glass-card">
           <h1 className="title">Nuova Lega</h1>
-          <p className="subtitle">Mastri di pannolini, unitevi!</p>
+          <p className="subtitle">Maestri di pannolini, unitevi!</p>
 
           {error && <p className="error-msg">{error}</p>}
 
@@ -266,7 +196,7 @@ function App() {
             <button className="btn btn-primary" onClick={handleCreateLeague} disabled={loading}>
               {loading ? <div className="loader"></div> : 'Fonda la Lega'}
             </button>
-            <button className="btn btn-secondary" onClick={() => setView('home')}>Indietro</button>
+            <button className="btn btn-secondary" onClick={() => { setError(''); setView('home'); }}>Indietro</button>
           </div>
         </div>
       </div>
@@ -295,7 +225,7 @@ function App() {
             <button className="btn btn-primary" onClick={handleJoinLeague} disabled={loading}>
               {loading ? <div className="loader"></div> : 'Entra Subito'}
             </button>
-            <button className="btn btn-secondary" onClick={() => setView('home')}>Indietro</button>
+            <button className="btn btn-secondary" onClick={() => { setError(''); setView('home'); }}>Indietro</button>
           </div>
         </div>
       </div>
