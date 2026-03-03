@@ -1,142 +1,257 @@
 import React, { useState, useEffect } from 'react';
-import { db } from './firebase';
-import { collection, doc, setDoc, getDoc, onSnapshot, query, orderBy, updateDoc, writeBatch } from 'firebase/firestore';
+import { db, auth } from './firebase';
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  onAuthStateChanged,
+  signOut,
+  updateProfile
+} from 'firebase/auth';
+import {
+  collection, doc, setDoc, getDoc, onSnapshot,
+  query, orderBy, updateDoc, writeBatch, arrayUnion
+} from 'firebase/firestore';
 
 function App() {
-  const [view, setView] = useState('home');
-  const [leagueCode, setLeagueCode] = useState('');
-  const [userName, setUserName] = useState('');
-  const [leagueName, setLeagueName] = useState('');
+  // Auth state
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState('login'); // login, register
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+
+  // App state
+  const [userLeagues, setUserLeagues] = useState([]);
+  const [selectedLeague, setSelectedLeague] = useState(null);
   const [leagueData, setLeagueData] = useState(null);
   const [teachers, setTeachers] = useState([]);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
   const [winner, setWinner] = useState(null);
+  const [showWinner, setShowWinner] = useState(false);
 
-  // Auto-login: se l'utente ha già una sessione salvata, entra direttamente
+  // Modal state
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addTab, setAddTab] = useState('join'); // join, create
+  const [modalLeagueName, setModalLeagueName] = useState('');
+  const [modalLeagueCode, setModalLeagueCode] = useState('');
+  const [modalError, setModalError] = useState('');
+  const [modalBusy, setModalBusy] = useState(false);
+
+  // Mobile sidebar
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // ===== AUTH LISTENER =====
   useEffect(() => {
-    const savedCode = localStorage.getItem('fp_leagueCode');
-    const savedUser = localStorage.getItem('fp_userName');
-    if (savedCode && savedUser) {
-      setLeagueCode(savedCode);
-      setUserName(savedUser);
-      setView('dashboard');
-    }
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthLoading(false);
+    });
+    return unsub;
   }, []);
 
-  // Create League
-  const handleCreateLeague = async () => {
-    if (!leagueName.trim() || !userName.trim()) {
-      setError('Inserisci il tuo nome e il nome della lega');
+  // ===== LOAD USER LEAGUES =====
+  useEffect(() => {
+    if (!user) {
+      setUserLeagues([]);
       return;
     }
-    setLoading(true);
-    setError('');
+    const unsub = onSnapshot(doc(db, "users", user.uid), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setUserLeagues(data.leagues || []);
+      } else {
+        setUserLeagues([]);
+      }
+    });
+    return unsub;
+  }, [user]);
+
+  // ===== LISTEN TO SELECTED LEAGUE =====
+  useEffect(() => {
+    if (!selectedLeague) {
+      setLeagueData(null);
+      setTeachers([]);
+      return;
+    }
+
+    const unsubLeague = onSnapshot(doc(db, "leagues", selectedLeague), (snap) => {
+      if (snap.exists()) setLeagueData({ id: snap.id, ...snap.data() });
+    });
+
+    const q = query(
+      collection(db, "leagues", selectedLeague, "teachers"),
+      orderBy("points", "desc")
+    );
+    const unsubTeachers = onSnapshot(q, (snapshot) => {
+      const t = [];
+      snapshot.forEach((d) => t.push({ id: d.id, ...d.data() }));
+      setTeachers(t);
+    });
+
+    return () => { unsubLeague(); unsubTeachers(); };
+  }, [selectedLeague]);
+
+  // ===== AUTH FUNCTIONS =====
+  const handleRegister = async () => {
+    if (!authEmail || !authPassword || !authName.trim()) {
+      setAuthError('Compila tutti i campi');
+      return;
+    }
+    if (authPassword.length < 6) {
+      setAuthError('La password deve avere almeno 6 caratteri');
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      await updateProfile(cred.user, { displayName: authName.trim() });
+      await setDoc(doc(db, "users", cred.user.uid), {
+        name: authName.trim(),
+        email: authEmail,
+        leagues: []
+      });
+    } catch (e) {
+      if (e.code === 'auth/email-already-in-use') setAuthError('Email già in uso');
+      else if (e.code === 'auth/invalid-email') setAuthError('Email non valida');
+      else setAuthError('Errore: ' + e.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleLogin = async () => {
+    if (!authEmail || !authPassword) {
+      setAuthError('Inserisci email e password');
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError('');
+    try {
+      await signInWithEmailAndPassword(auth, authEmail, authPassword);
+    } catch (e) {
+      if (e.code === 'auth/wrong-password' || e.code === 'auth/invalid-credential') setAuthError('Email o password errati');
+      else if (e.code === 'auth/user-not-found') setAuthError('Utente non trovato');
+      else setAuthError('Errore: ' + e.message);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+    setSelectedLeague(null);
+    setLeagueData(null);
+    setTeachers([]);
+  };
+
+  // ===== LEAGUE FUNCTIONS =====
+  const handleCreateLeague = async () => {
+    if (!modalLeagueName.trim()) {
+      setModalError('Inserisci un nome per la lega');
+      return;
+    }
+    setModalBusy(true);
+    setModalError('');
 
     const code = Math.random().toString(36).substring(2, 7).toUpperCase();
+    const displayName = user.displayName || 'Anonimo';
 
     try {
       await setDoc(doc(db, "leagues", code), {
-        name: leagueName.trim(),
-        createdBy: userName.trim(),
+        name: modalLeagueName.trim(),
+        createdBy: displayName,
+        createdByUid: user.uid,
         createdAt: new Date()
       });
-      await setDoc(doc(db, "leagues", code, "teachers", userName.trim()), {
-        points: 0
+      await setDoc(doc(db, "leagues", code, "teachers", displayName), {
+        points: 0,
+        uid: user.uid
       });
-      setLeagueCode(code);
-      setUserName(userName.trim());
-      localStorage.setItem('fp_leagueCode', code);
-      localStorage.setItem('fp_userName', userName.trim());
-      setView('dashboard');
+      // Add league to user's list
+      await setDoc(doc(db, "users", user.uid), {
+        leagues: arrayUnion(code)
+      }, { merge: true });
+
+      setSelectedLeague(code);
+      setShowAddModal(false);
+      setModalLeagueName('');
+      setSidebarOpen(false);
     } catch (e) {
-      console.error(e);
-      setError('Errore di connessione a Firebase: ' + e.message);
+      setModalError('Errore: ' + e.message);
     } finally {
-      setLoading(false);
+      setModalBusy(false);
     }
   };
 
-  // Join League
   const handleJoinLeague = async () => {
-    if (!leagueCode.trim() || !userName.trim()) {
-      setError('Inserisci il tuo nome e il codice della lega');
+    if (!modalLeagueCode.trim()) {
+      setModalError('Inserisci il codice della lega');
       return;
     }
-    setLoading(true);
-    setError('');
-    const code = leagueCode.trim().toUpperCase();
-    const name = userName.trim();
+    setModalBusy(true);
+    setModalError('');
+
+    const code = modalLeagueCode.trim().toUpperCase();
+    const displayName = user.displayName || 'Anonimo';
 
     try {
       const leagueSnap = await getDoc(doc(db, "leagues", code));
-      if (leagueSnap.exists()) {
-        // La lega esiste! Aggiungi la maestra se non c'è già
-        const tDoc = await getDoc(doc(db, "leagues", code, "teachers", name));
-        if (!tDoc.exists()) {
-          await setDoc(doc(db, "leagues", code, "teachers", name), { points: 0 });
-        }
-        setLeagueCode(code);
-        setUserName(name);
-        localStorage.setItem('fp_leagueCode', code);
-        localStorage.setItem('fp_userName', name);
-        setView('dashboard');
-      } else {
-        setError('Lega non trovata! Controlla il codice e riprova.');
+      if (!leagueSnap.exists()) {
+        setModalError('Lega non trovata! Controlla il codice.');
+        setModalBusy(false);
+        return;
       }
+      // Add teacher if not already in
+      const teacherSnap = await getDoc(doc(db, "leagues", code, "teachers", displayName));
+      if (!teacherSnap.exists()) {
+        await setDoc(doc(db, "leagues", code, "teachers", displayName), {
+          points: 0,
+          uid: user.uid
+        });
+      }
+      // Add league to user's list
+      await setDoc(doc(db, "users", user.uid), {
+        leagues: arrayUnion(code)
+      }, { merge: true });
+
+      setSelectedLeague(code);
+      setShowAddModal(false);
+      setModalLeagueCode('');
+      setSidebarOpen(false);
     } catch (e) {
-      console.error(e);
-      setError('Errore di connessione: ' + e.message);
+      setModalError('Errore: ' + e.message);
     } finally {
-      setLoading(false);
+      setModalBusy(false);
     }
   };
 
-  // Realtime updates when in dashboard
-  useEffect(() => {
-    if (view === 'dashboard' && leagueCode) {
-      const unsubLeague = onSnapshot(doc(db, "leagues", leagueCode), (docSnap) => {
-        if (docSnap.exists()) setLeagueData({ id: docSnap.id, ...docSnap.data() });
-      });
-
-      const q = query(collection(db, "leagues", leagueCode, "teachers"), orderBy("points", "desc"));
-      const unsubTeachers = onSnapshot(q, (snapshot) => {
-        const t = [];
-        snapshot.forEach((docSnap) => t.push({ id: docSnap.id, ...docSnap.data() }));
-        setTeachers(t);
-      });
-
-      return () => { unsubLeague(); unsubTeachers(); };
-    }
-  }, [view, leagueCode]);
-
-  // Add Point (Diaper changed!)
   const handleAddDiaper = async () => {
+    if (!user || !selectedLeague) return;
+    const displayName = user.displayName || 'Anonimo';
     try {
-      const userRef = doc(db, "leagues", leagueCode, "teachers", userName);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        await updateDoc(userRef, { points: userSnap.data().points + 1 });
+      const ref = doc(db, "leagues", selectedLeague, "teachers", displayName);
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        await updateDoc(ref, { points: snap.data().points + 1 });
       }
     } catch (e) {
       alert("Errore nell'aggiunta del pannolino!");
     }
   };
 
-  // Reset Week
   const handleEndWeek = async () => {
     if (teachers.length === 0) return;
-
     const sorted = [...teachers].sort((a, b) => b.points - a.points);
-    const weeklyWinner = sorted[0];
-
-    setWinner(weeklyWinner);
-    setView('winner');
+    setWinner(sorted[0]);
+    setShowWinner(true);
 
     try {
       const batch = writeBatch(db);
       teachers.forEach(t => {
-        const ref = doc(db, "leagues", leagueCode, "teachers", t.id);
+        const ref = doc(db, "leagues", selectedLeague, "teachers", t.id);
         batch.update(ref, { points: 0 });
       });
       await batch.commit();
@@ -145,149 +260,213 @@ function App() {
     }
   };
 
-  const handleLogout = () => {
-    setLeagueCode('');
-    setUserName('');
-    setLeagueData(null);
-    setTeachers([]);
-    setView('home');
-    localStorage.removeItem('fp_leagueCode');
-    localStorage.removeItem('fp_userName');
-  };
-
-  // --- RENDERS ---
-
-  if (view === 'home') {
+  // ===== LOADING =====
+  if (authLoading) {
     return (
-      <div className="app-container">
-        <div className="glass-card">
+      <div className="auth-wrapper">
+        <div className="loader" style={{ width: 48, height: 48 }}></div>
+      </div>
+    );
+  }
+
+  // ===== AUTH SCREEN =====
+  if (!user) {
+    return (
+      <div className="auth-wrapper">
+        <div className="auth-card glass-card">
           <h1 className="title">FantaPannolino 👶</h1>
           <p className="subtitle">La lega più profumata dell'asilo!</p>
 
-          <div className="input-group">
-            <button className="btn btn-primary" onClick={() => { setError(''); setView('join'); }}>Entra in una Lega</button>
-            <div className="divider">oppure</div>
-            <button className="btn btn-secondary" onClick={() => { setError(''); setView('create'); }}>Crea Nuova Lega</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (view === 'create') {
-    return (
-      <div className="app-container">
-        <div className="glass-card">
-          <h1 className="title">Nuova Lega</h1>
-          <p className="subtitle">Maestri di pannolini, unitevi!</p>
-
-          {error && <p className="error-msg">{error}</p>}
-
-          <div className="input-group">
-            <label>Nome della Lega</label>
-            <input type="text" placeholder="Es. Asilo Nido Gli Sbirulini" value={leagueName} onChange={e => setLeagueName(e.target.value)} />
-          </div>
-          <div className="input-group">
-            <label>Il Tuo Nome (Maestro/a)</label>
-            <input type="text" placeholder="Es. Maestra Giulia" value={userName} onChange={e => setUserName(e.target.value)} />
+          <div className="tabs">
+            <button className={`tab ${authMode === 'login' ? 'active' : ''}`} onClick={() => { setAuthMode('login'); setAuthError(''); }}>Accedi</button>
+            <button className={`tab ${authMode === 'register' ? 'active' : ''}`} onClick={() => { setAuthMode('register'); setAuthError(''); }}>Registrati</button>
           </div>
 
-          <div className="input-group" style={{ marginTop: '2rem' }}>
-            <button className="btn btn-primary" onClick={handleCreateLeague} disabled={loading}>
-              {loading ? <div className="loader"></div> : 'Fonda la Lega'}
-            </button>
-            <button className="btn btn-secondary" onClick={() => { setError(''); setView('home'); }}>Indietro</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+          {authError && <p className="error-msg">{authError}</p>}
 
-  if (view === 'join') {
-    return (
-      <div className="app-container">
-        <div className="glass-card">
-          <h1 className="title">Entra in Lega</h1>
-          <p className="subtitle">Preparati a cambiare pannolini!</p>
-
-          {error && <p className="error-msg">{error}</p>}
-
-          <div className="input-group">
-            <label>Codice Lega (5 Lettere)</label>
-            <input type="text" placeholder="Es. ABCD1" value={leagueCode} onChange={e => setLeagueCode(e.target.value.toUpperCase())} maxLength={5} />
-          </div>
-          <div className="input-group">
-            <label>Il Tuo Nome (Maestro/a)</label>
-            <input type="text" placeholder="Es. Maestra Giulia" value={userName} onChange={e => setUserName(e.target.value)} />
-          </div>
-
-          <div className="input-group" style={{ marginTop: '2rem' }}>
-            <button className="btn btn-primary" onClick={handleJoinLeague} disabled={loading}>
-              {loading ? <div className="loader"></div> : 'Entra Subito'}
-            </button>
-            <button className="btn btn-secondary" onClick={() => { setError(''); setView('home'); }}>Indietro</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (view === 'dashboard') {
-    return (
-      <div className="app-container">
-        <div className="dashboard-header">
-          <div className="league-info">
-            <h2>{leagueData?.name || 'Lega FantaPannolino'}</h2>
-            <p>Codice Lega: {leagueCode}</p>
-          </div>
-          <button className="btn btn-secondary btn-logout" onClick={handleLogout}>Esci</button>
-        </div>
-
-        <div className="glass-card" style={{ padding: '1.5rem', textAlign: 'center' }}>
-          <h3>Ciao {userName}!</h3>
-          <p style={{ color: 'var(--text-secondary)' }}>È il momento di darsi da fare!</p>
-
-          <div className="big-btn-container">
-            <button className="big-diaper-btn" onClick={handleAddDiaper}>
-              <span className="diaper-icon">🧷</span>
-              <span>+1 Cambio</span>
-            </button>
-          </div>
-        </div>
-
-        <div className="glass-card leaderboard">
-          <h3>🏆 Classifica Settimanale</h3>
-
-          {teachers.length === 0 && <p style={{ textAlign: 'center', opacity: 0.5 }}>Nessuna maestra registrata.</p>}
-
-          {teachers.map((t, index) => (
-            <div key={t.id} className={`teacher-item ${index === 0 && t.points > 0 ? 'first-place' : ''}`}>
-              <div className="teacher-info">
-                <span className="rank">#{index + 1}</span>
-                <span className="teacher-name">{t.id} {t.id === userName ? '(Tu)' : ''}</span>
-              </div>
-              <div className="teacher-points">{t.points} pts</div>
-            </div>
-          ))}
-
-          {leagueData?.createdBy === userName && (
-            <div style={{ marginTop: '2rem' }}>
-              <div className="divider">Area Admin</div>
-              <button className="btn btn-danger" onClick={() => {
-                if (confirm("Sei sicuro di voler terminare la settimana? Tutti i punti verranno azzerati.")) {
-                  handleEndWeek();
-                }
-              }}>Termina Settimana</button>
+          {authMode === 'register' && (
+            <div className="input-group">
+              <label>Il Tuo Nome</label>
+              <input type="text" placeholder="Es. Maestra Giulia" value={authName} onChange={e => setAuthName(e.target.value)} />
             </div>
           )}
+
+          <div className="input-group">
+            <label>Email</label>
+            <input type="email" placeholder="email@esempio.com" value={authEmail} onChange={e => setAuthEmail(e.target.value)} />
+          </div>
+
+          <div className="input-group">
+            <label>Password</label>
+            <input type="password" placeholder="La tua password" value={authPassword} onChange={e => setAuthPassword(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') authMode === 'login' ? handleLogin() : handleRegister(); }}
+            />
+          </div>
+
+          <div className="input-group" style={{ marginTop: '1rem' }}>
+            <button className="btn btn-primary" onClick={authMode === 'login' ? handleLogin : handleRegister} disabled={authBusy}>
+              {authBusy ? <div className="loader"></div> : (authMode === 'login' ? 'Accedi' : 'Registrati')}
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
-  if (view === 'winner') {
-    return (
-      <div className="app-container">
+  // ===== MAIN APP =====
+  const displayName = user.displayName || 'Utente';
+  const initials = displayName.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+
+  return (
+    <>
+      {/* Mobile Header */}
+      <div className="mobile-header">
+        <button className="hamburger" onClick={() => setSidebarOpen(true)}>☰</button>
+        <h2>FantaPannolino</h2>
+        <div style={{ width: 24 }}></div>
+      </div>
+
+      {/* Sidebar overlay for mobile */}
+      <div className={`sidebar-overlay ${sidebarOpen ? 'open' : ''}`} onClick={() => setSidebarOpen(false)} />
+
+      {/* Sidebar */}
+      <div className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+        <div className="sidebar-user">
+          <div className="user-avatar">{initials}</div>
+          <div className="user-details">
+            <h3>{displayName}</h3>
+            <p>{user.email}</p>
+          </div>
+        </div>
+
+        <div className="sidebar-nav">
+          <h4>Le Tue Leghe</h4>
+          <ul className="league-list">
+            {userLeagues.length === 0 && (
+              <li style={{ padding: '1rem', opacity: 0.5, fontSize: '0.9rem' }}>Nessuna lega ancora</li>
+            )}
+            {userLeagues.map((code) => (
+              <li
+                key={code}
+                className={`league-list-item ${selectedLeague === code ? 'active' : ''}`}
+                onClick={() => { setSelectedLeague(code); setSidebarOpen(false); }}
+              >
+                <span className="league-emoji">🏆</span>
+                <span className="league-item-name">{code}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="sidebar-bottom">
+          <button className="btn btn-add-league btn-small" onClick={() => { setShowAddModal(true); setModalError(''); }}>
+            ➕ Aggiungi Lega
+          </button>
+          <button className="btn btn-logout-sidebar btn-small" onClick={handleLogout}>
+            🚪 Esci
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="content-area">
+        {!selectedLeague ? (
+          <div className="welcome-center">
+            <div className="welcome-emoji">👶</div>
+            <h2>Benvenuto/a, {displayName}!</h2>
+            <p>Seleziona una lega dalla barra laterale o creane una nuova.</p>
+          </div>
+        ) : (
+          <>
+            <div className="dashboard-header">
+              <div className="league-info">
+                <h2>{leagueData?.name || 'Caricamento...'}</h2>
+                <p>Codice: {selectedLeague}</p>
+              </div>
+            </div>
+
+            <div className="glass-card" style={{ textAlign: 'center' }}>
+              <h3>Ciao {displayName}!</h3>
+              <p style={{ color: 'var(--text-secondary)' }}>È il momento di darsi da fare!</p>
+
+              <div className="big-btn-container">
+                <button className="big-diaper-btn" onClick={handleAddDiaper}>
+                  <span className="diaper-icon">🧷</span>
+                  <span>+1 Cambio</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="glass-card leaderboard">
+              <h3>🏆 Classifica Settimanale</h3>
+
+              {teachers.length === 0 && <p style={{ textAlign: 'center', opacity: 0.5 }}>Nessuna maestra registrata.</p>}
+
+              {teachers.map((t, index) => (
+                <div key={t.id} className={`teacher-item ${index === 0 && t.points > 0 ? 'first-place' : ''}`}>
+                  <div className="teacher-info">
+                    <span className="rank">#{index + 1}</span>
+                    <span className="teacher-name">{t.id} {t.uid === user.uid ? '(Tu)' : ''}</span>
+                  </div>
+                  <div className="teacher-points">{t.points} pts</div>
+                </div>
+              ))}
+
+              {leagueData?.createdByUid === user.uid && (
+                <div style={{ marginTop: '2rem' }}>
+                  <div className="divider">Area Admin</div>
+                  <button className="btn btn-danger" onClick={() => {
+                    if (confirm("Sei sicuro? Tutti i punti verranno azzerati.")) handleEndWeek();
+                  }}>Termina Settimana</button>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* ADD LEAGUE MODAL */}
+      {showAddModal && (
+        <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h1 className="title" style={{ fontSize: '1.8rem' }}>Aggiungi Lega</h1>
+
+            <div className="tabs" style={{ marginTop: '1rem' }}>
+              <button className={`tab ${addTab === 'join' ? 'active' : ''}`} onClick={() => { setAddTab('join'); setModalError(''); }}>Entra</button>
+              <button className={`tab ${addTab === 'create' ? 'active' : ''}`} onClick={() => { setAddTab('create'); setModalError(''); }}>Crea Nuova</button>
+            </div>
+
+            {modalError && <p className="error-msg">{modalError}</p>}
+
+            {addTab === 'join' ? (
+              <>
+                <div className="input-group">
+                  <label>Codice Lega</label>
+                  <input type="text" placeholder="Es. ABCD1" value={modalLeagueCode} onChange={e => setModalLeagueCode(e.target.value.toUpperCase())} maxLength={5} />
+                </div>
+                <button className="btn btn-primary" onClick={handleJoinLeague} disabled={modalBusy}>
+                  {modalBusy ? <div className="loader"></div> : 'Entra nella Lega'}
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="input-group">
+                  <label>Nome della Lega</label>
+                  <input type="text" placeholder="Es. Asilo Nido Gli Sbirulini" value={modalLeagueName} onChange={e => setModalLeagueName(e.target.value)} />
+                </div>
+                <button className="btn btn-primary" onClick={handleCreateLeague} disabled={modalBusy}>
+                  {modalBusy ? <div className="loader"></div> : 'Crea la Lega'}
+                </button>
+              </>
+            )}
+
+            <button className="btn btn-secondary" style={{ marginTop: '0.75rem' }} onClick={() => setShowAddModal(false)}>Annulla</button>
+          </div>
+        </div>
+      )}
+
+      {/* WINNER MODAL */}
+      {showWinner && (
         <div className="modal-overlay">
           <div className="modal-content">
             <div className="winner-icon">👑</div>
@@ -299,16 +478,14 @@ function App() {
             </h2>
             <p style={{ marginBottom: '2rem' }}>con ben <strong>{winner?.points}</strong> cambi pannolino!</p>
 
-            <button className="btn btn-primary" onClick={() => setView('dashboard')}>
+            <button className="btn btn-primary" onClick={() => setShowWinner(false)}>
               Inizia Nuova Settimana!
             </button>
           </div>
         </div>
-      </div>
-    );
-  }
-
-  return null;
+      )}
+    </>
+  );
 }
 
 export default App;
